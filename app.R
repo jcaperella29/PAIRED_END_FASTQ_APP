@@ -1,4 +1,3 @@
-# Load required libraries
 library(shiny)
 library(shinythemes)
 library(DT)
@@ -74,38 +73,34 @@ get_phred_offset <- function(machine_type) {
          stop("Unknown machine type"))
 }
 
-# Custom demultiplexing function
-custom_demultiplex <- function(fastq_file, barcodes, output_dir) {
-  sequences <- sread(readFastq(fastq_file))
-  qualities <- extract_quality_scores(fastq_file)
-  demux_results <- list()
+filter_fastq_by_quality <- function(fastq_file, output_dir, phred_offset, quality_threshold) {
+  # Generate a timestamp
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
   
-  for (barcode in barcodes) {
-    matched_indices <- grep(barcode, as.character(sequences))
-    if (length(matched_indices) > 0) {
-      demux_results[[barcode]] <- list(
-        sequences = as.character(sequences[matched_indices]),
-        qualities = qualities[matched_indices]
-      )
-    }
-  }
+  # Read the FASTQ sequences and their quality scores
+  fq <- readFastq(fastq_file)
+  quality_scores <- extract_quality_scores(fastq_file, phred_offset)
   
-  for (barcode in names(demux_results)) {
-    output_file <- file.path(output_dir, paste0("demultiplexed_", barcode, ".fastq"))
-    seqs <- demux_results[[barcode]]$sequences
-    quals <- demux_results[[barcode]]$qualities
-    
-    quality_scores <- BStringSet(sapply(quals, function(q) {
-      paste(convert_numeric_to_ascii(q), collapse = "")
-    }))
-    writeFastq(ShortReadQ(sread = DNAStringSet(seqs), quality = quality_scores), output_file, mode = "w", compress = FALSE, append = FALSE)
-  }
+  # Identify reads that meet the quality threshold
+  reads_above_threshold <- which(sapply(quality_scores, function(scores) {
+    mean(scores) >= quality_threshold
+  }))
   
-  return(output_dir)
+  # Filter sequences and quality scores based on the threshold
+  filtered_seqs <- fq[reads_above_threshold]
+  
+  # Generate the output filename with timestamp
+  output_file <- file.path(output_dir, paste0("filtered_", basename(fastq_file), "_", timestamp, ".fastq"))
+  
+  # Write the filtered sequences to the new FASTQ file, overwriting if it exists
+  writeFastq(filtered_seqs, output_file, mode = "w", compress = FALSE, append = FALSE)
+  
+  return(output_file)
 }
 
-# Function to read a FASTQ file and extract quality scores
-extract_quality_scores <- function(fastq_file) {
+
+# Function to read a FASTQ file and extract quality scores with Phred offset consideration
+extract_quality_scores <- function(fastq_file, phred_offset) {
   con <- file(fastq_file, open = "r")
   quality_scores <- list()
   line_counter <- 0
@@ -123,7 +118,7 @@ extract_quality_scores <- function(fastq_file) {
   
   convert_to_phred <- function(ascii_chars) {
     sapply(ascii_chars, function(char) {
-      as.integer(charToRaw(char)) - 33
+      as.integer(charToRaw(char)) - phred_offset
     })
   }
   
@@ -132,11 +127,12 @@ extract_quality_scores <- function(fastq_file) {
 }
 
 # Function to convert numeric Phred scores to ASCII characters
-convert_numeric_to_ascii <- function(numeric_qualities) {
+convert_numeric_to_ascii <- function(numeric_qualities, phred_offset) {
   sapply(numeric_qualities, function(score) {
-    rawToChar(as.raw(score + 33))
+    rawToChar(as.raw(score + phred_offset))
   })
 }
+
 
 # Function to process quality scores and compute statistics
 process_chunk <- function(quality_scores, quality_threshold) {
@@ -151,25 +147,84 @@ process_chunk <- function(quality_scores, quality_threshold) {
   )
 }
 
+filter_fastq_by_quality <- function(fastq_file, output_dir, phred_offset, quality_threshold) {
+  # Generate a timestamp
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  
+  # Read the FASTQ sequences and their quality scores
+  fq <- readFastq(fastq_file)
+  quality_scores <- extract_quality_scores(fastq_file, phred_offset)
+  
+  # Identify reads that meet the quality threshold
+  reads_above_threshold <- which(sapply(quality_scores, function(scores) {
+    mean(scores) >= quality_threshold
+  }))
+  
+  # Filter sequences and quality scores based on the threshold
+  filtered_seqs <- fq[reads_above_threshold]
+  
+  # Generate the output filename with timestamp
+  output_file <- file.path(output_dir, paste0("filtered_", basename(fastq_file), "_", timestamp, ".fastq"))
+  
+  # Write the filtered sequences to the new FASTQ file
+  writeFastq(filtered_seqs, output_file, mode = "w", compress = FALSE, append = FALSE)
+  
+  return(output_file)
+}
 
+custom_demultiplex <- function(fastq_file, barcodes, output_dir, phred_offset) {
+  sequences <- sread(readFastq(fastq_file))
+  qualities <- extract_quality_scores(fastq_file, phred_offset)  # Pass phred_offset here
+  
+  demux_results <- list()
+  
+  for (barcode in barcodes) {
+    matched_indices <- grep(barcode, as.character(sequences))
+    if (length(matched_indices) > 0) {
+      demux_results[[barcode]] <- list(
+        sequences = as.character(sequences[matched_indices]),
+        qualities = qualities[matched_indices]
+      )
+    }
+  }
+  
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  
+  for (barcode in names(demux_results)) {
+    output_file <- file.path(output_dir, paste0("demultiplexed_", barcode, "_", timestamp, ".fastq"))
+    seqs <- demux_results[[barcode]]$sequences
+    quals <- demux_results[[barcode]]$qualities
+    
+    quality_scores <- BStringSet(sapply(quals, function(q) {
+      paste(convert_numeric_to_ascii(q, phred_offset), collapse = "")
+    }))
+    
+    # Overwrite existing file if it exists
+    writeFastq(ShortReadQ(sread = DNAStringSet(seqs), quality = quality_scores), output_file, mode = "w", compress = FALSE, append = FALSE)
+  }
+  
+  return(output_dir)
+}
+
+# Define UI
 ui <- fluidPage(
   theme = shinytheme("cyborg"),
-  titlePanel("JCap Paired_End Fastq Processing App"),
+  titlePanel("JCap Paired_End FASTQ Processing App"),
   sidebarLayout(
     sidebarPanel(
       shinyDirButton("directory", "Set Working Directory", "Please select a directory"),
       fileInput("fastq_file1", "Upload FASTQ File 1", accept = c(".fastq", ".fq")),
       fileInput("fastq_file2", "Upload FASTQ File 2", accept = c(".fastq", ".fq")),
+      selectInput("machine_type", "Select Sequencing Machine Type", 
+                  choices = c("Illumina/Sanger (Phred+33)" = "phred33", 
+                              "Solexa (Phred+64)" = "phred64")),
       textInput("sample_name", "Name of Sample", value = "Sample1"),
       fileInput("barcodes_file", "Upload Barcodes File (Optional)", accept = c(".csv", ".tsv", ".txt")),
       actionButton("demultiplex", "Run Demultiplexing"),
       fileInput("demultiplexed_file1", "Upload Demultiplexed File 1", accept = c(".fastq", ".fq")),
       fileInput("demultiplexed_file2", "Upload Demultiplexed File 2", accept = c(".fastq", ".fq")),
-      selectInput("machine_type", "Select Sequencing Machine Type", 
-                  choices = c("Illumina (Phred+33)" = "phred33", 
-                              "Sanger (Phred+33)" = "phred33", 
-                              "Solexa/Illumina (Phred+64)" = "phred64")),
       actionButton("generate_summary", "Generate FASTQ Summary"),
+      downloadButton("download_summary", "Download Summary as CSV"),
       sliderInput("quality_threshold", "Quality Threshold", min = 0, max = 100, value = 20),
       actionButton("filter_reads", "Filter Reads Below Quality Threshold"),
       fileInput("filtered_fastq_file1", "Upload Filtered FASTQ File 1 (Optional)", accept = c(".fastq", ".fq")),
@@ -200,9 +255,25 @@ ui <- fluidPage(
   )
 )
 
-
+# Define Server
 server <- function(input, output, session) {
   options(shiny.maxRequestSize = 2 * 1024^50000)
+  
+  readme_file_path <- "JCAP Paired_End FASTQ Processing App_ReadMe.txt" # Update this path to your actual README file
+  
+  # Reactive expression to read the README file
+  readme_contents <- reactive({
+    if (file.exists(readme_file_path)) {
+      readLines(readme_file_path, warn = FALSE)
+    } else {
+      "README file not found."
+    }
+  })
+  
+  # Render the README content
+  output$readme_contents <- renderText({
+    paste(readme_contents(), collapse = "\n")
+  })
   
   volumes <- c(Home = fs::path_home(), "R Installation" = R.home(), getVolumes()())
   shinyDirChoose(input, "directory", roots = volumes, session = session)
@@ -235,6 +306,40 @@ server <- function(input, output, session) {
     showNotification("FASTQ File 1 uploaded", duration = 2)
     fastq_files(list(file1 = input$fastq_file1, file2 = fastq_files()$file2))
     showNotification("FASTQ File 1 uploaded successfully.")
+  })
+  observeEvent(input$filter_reads, {
+    req(fastq_files()$file1, fastq_files()$file2)
+    
+    # Notify the user that filtering has started
+    showNotification("Filtering reads below quality threshold started.", duration = 2)
+    
+    future({
+      phred_offset <- get_phred_offset(input$machine_type)
+      quality_threshold <- input$quality_threshold
+      
+      # Define the output directory
+      output_dir <- working_dir()
+      
+      # Filter the reads for each FASTQ file with a timestamped name
+      filtered_file1 <- filter_fastq_by_quality(fastq_files()$file1$datapath, output_dir, phred_offset, quality_threshold)
+      filtered_file2 <- filter_fastq_by_quality(fastq_files()$file2$datapath, output_dir, phred_offset, quality_threshold)
+      
+      list(filtered_file1 = filtered_file1, filtered_file2 = filtered_file2)
+    }) %...>% (function(filtered_files) {
+      # Update reactive values with the newly filtered files
+      filtered_files(list(file1 = filtered_files$filtered_file1, file2 = filtered_files$filtered_file2))
+      
+      # Notify the user that filtering has completed
+      showNotification("Filtering reads below quality threshold completed.", duration = 2)
+    }) %...!% (function(err) {
+      # Notify the user if an error occurs during filtering
+      showModal(modalDialog(
+        title = "Error",
+        paste("Error during filtering process:", err$message),
+        easyClose = TRUE,
+        footer = NULL
+      ))
+    })
   })
   
   observeEvent(input$fastq_file2, {
@@ -278,61 +383,76 @@ server <- function(input, output, session) {
     genome_fasta_path_indexing(input$genome_fasta_indexing$datapath)
   })
   
+  summary_df <- reactiveVal(NULL)  # Store the summary data frame for download
+  
   observeEvent(input$generate_summary, {
-    files_to_use <- if (!is.null(filtered_files()$file1) && !is.null(filtered_files()$file2)) {
-      c(filtered_files()$file1$datapath, filtered_files()$file2$datapath)
-    } else if (!is.null(demultiplexed_files()$file1) && !is.null(demultiplexed_files()$file2)) {
-      c(demultiplexed_files()$file1$datapath, demultiplexed_files()$file2$datapath)
+    req(
+      (isTruthy(input$fastq_file1) && isTruthy(input$fastq_file2)) ||
+        (isTruthy(demultiplexed_files()$file1) && isTruthy(demultiplexed_files()$file2)) ||
+        (isTruthy(filtered_files()$file1) && isTruthy(filtered_files()$file2))
+    )
+    
+    filename1 <- if (!isTruthy(filtered_files()$file1)) {
+      if (!isTruthy(demultiplexed_files()$file1)) {
+        input$fastq_file1$name
+      } else {
+        demultiplexed_files()$file1$name
+      }
     } else {
-      c(fastq_files()$file1$datapath, fastq_files()$file2$datapath)
+      filtered_files()$file1$name
     }
-    req(files_to_use)
+    
+    filename2 <- if (!isTruthy(filtered_files()$file2)) {
+      if (!isTruthy(demultiplexed_files()$file2)) {
+        input$fastq_file2$name
+      } else {
+        demultiplexed_files()$file2$name
+      }
+    } else {
+      filtered_files()$file2$name
+    }
+    
+    file_to_use1 <- if (isTruthy(filtered_files()$file1)) {
+      filtered_files()$file1$datapath
+    } else if (isTruthy(demultiplexed_files()$file1)) {
+      demultiplexed_files()$file1$datapath
+    } else {
+      input$fastq_file1$datapath
+    }
+    
+    file_to_use2 <- if (isTruthy(filtered_files()$file2)) {
+      filtered_files()$file2$datapath
+    } else if (isTruthy(demultiplexed_files()$file2)) {
+      demultiplexed_files()$file2$datapath
+    } else {
+      input$fastq_file2$datapath
+    }
+    
+    req(file_to_use1, file_to_use2)  # Both files must be present
+    
     showNotification("Generating FASTQ summary", duration = 2)
     
-    filename1 <- basename(files_to_use[1])
-    filename2 <- if (length(files_to_use) > 1) basename(files_to_use[2]) else NA
     quality_threshold <- input$quality_threshold
-    phred_offset <- get_phred_offset(input$machine_type)
+    phred_offset <- get_phred_offset(input$quality_threshold)
     
     future({
-      quality_scores1 <- extract_quality_scores(files_to_use[1])
-      if (!is.na(filename2)) {
-        quality_scores2 <- extract_quality_scores(files_to_use[2])
-      } else {
-        quality_scores2 <- NULL
-      }
+      quality_scores1 <- extract_quality_scores(file_to_use1)
+      quality_scores2 <- extract_quality_scores(file_to_use2)
       
       res1 <- process_chunk(quality_scores1, quality_threshold)
-      if (!is.null(quality_scores2)) {
-        res2 <- process_chunk(quality_scores2, quality_threshold)
-      } else {
-        res2 <- NULL
-      }
-      
-      avg_quality1 <- res1$avg_quality
-      percent_above_threshold1 <- res1$percent_above_threshold
-      num_reads1 <- res1$num_reads
-      
-      if (!is.null(res2)) {
-        avg_quality2 <- res2$avg_quality
-        percent_above_threshold2 <- res2$percent_above_threshold
-        num_reads2 <- res2$num_reads
-      } else {
-        avg_quality2 <- NA
-        percent_above_threshold2 <- NA
-        num_reads2 <- NA
-      }
+      res2 <- process_chunk(quality_scores2, quality_threshold)
       
       summary_df <- data.frame(
-        Filename = c(filename1, if (!is.na(filename2)) filename2 else NULL),
-        NumReads = c(num_reads1, if (!is.null(num_reads2)) num_reads2 else NULL),
-        PercentAboveThreshold = c(percent_above_threshold1, if (!is.null(percent_above_threshold2)) percent_above_threshold2 else NULL),
-        AvgQuality = c(avg_quality1, if (!is.null(avg_quality2)) avg_quality2 else NULL)
+        Filename = c(filename1, filename2),
+        NumReads = c(res1$num_reads, res2$num_reads),
+        PercentAboveThreshold = c(res1$percent_above_threshold, res2$percent_above_threshold),
+        AvgQuality = c(res1$avg_quality, res2$avg_quality)
       )
       summary_df
-    }, seed = TRUE) %...>% (function(summary_df) {
+    }, seed = TRUE) %...>% (function(summary_df_result) {
+      summary_df(summary_df_result)  # Store summary data for download
       output$fastq_summary <- renderDT({
-        datatable(summary_df)
+        datatable(summary_df_result)
       })
     }) %...!% (function(err) {
       showModal(modalDialog(
@@ -344,91 +464,21 @@ server <- function(input, output, session) {
     })
   })
   
-  observeEvent(input$filter_reads, {
-    # Capture the current value of working_dir() in a non-reactive variable
-    current_working_dir <- working_dir()
-    
-    # Determine which files to use for filtering
-    files_to_use <- if (!is.null(filtered_files()$file1) && !is.null(filtered_files()$file2)) {
-      c(filtered_files()$file1$datapath, filtered_files()$file2$datapath)
-    } else if (!is.null(demultiplexed_files()$file1) && !is.null(demultiplexed_files()$file2)) {
-      c(demultiplexed_files()$file1$datapath, demultiplexed_files()$file2$datapath)
-    } else {
-      c(fastq_files()$file1$datapath, fastq_files()$file2$datapath)
+  output$download_summary <- downloadHandler(
+    filename = function() {
+      paste("FASTQ_summary-", Sys.Date(), ".csv", sep = "")
+    },
+    content = function(file) {
+      req(summary_df())  # Ensure summary exists before allowing download
+      write.csv(summary_df(), file, row.names = FALSE)
     }
-    req(files_to_use)
-    req(input$machine_type)
-    
-    showNotification("Filtering reads", duration = 2)
-    
-    quality_threshold <- input$quality_threshold
-    
-    future({
-      # Get the current date and time for unique filenames
-      timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-      
-      # Iterate over the list of files, filter each one, and write the output FASTQ file
-      filtered_files_list <- lapply(seq_along(files_to_use), function(i) {
-        output_filename <- paste0(timestamp, "_filtered_", i, ".fastq")
-        filter_and_write_fastq(files_to_use[[i]], quality_threshold, current_working_dir, output_filename)
-      })
-      
-      filtered_files_list
-    }, seed = TRUE) %...>% (function(result) {
-      showNotification("Reads filtered successfully.")
-      
-      # Get read counts for each file
-      read_counts <- sapply(result, get_read_count)
-      
-      # Update the filtered_files reactive list with the new filtered files
-      filtered_files(list(file1 = result[[1]], file2 = ifelse(length(result) > 1, result[[2]], NULL)))
-      
-      # Notify the user about the number of reads in each file and their paths
-      showNotification(paste("Filtered FASTQ 1 has", read_counts[1], "reads. Path:", result[[1]]), duration = 5)
-      if (length(result) > 1 && !is.null(result[[2]])) {
-        showNotification(paste("Filtered FASTQ 2 has", read_counts[2], "reads. Path:", result[[2]]), duration = 5)
-      }
-    }) %...!% (function(err) {
-      showModal(modalDialog(
-        title = "Error",
-        paste("Error filtering reads:", err$message),
-        easyClose = TRUE,
-        footer = NULL
-      ))
-    })
-  })
-  
-  # Function to filter reads, write them to a new FASTQ file, and return the file path
-  filter_and_write_fastq <- function(fastq_file, quality_threshold, output_dir, output_filename) {
-    phred_offset <- 33
-    reads <- readFastq(fastq_file)
-    quality_scores <- extract_quality_scores(fastq_file)
-    
-    # Filter reads based on the quality threshold
-    pass_filter <- sapply(quality_scores, function(q) mean(q) >= quality_threshold)
-    filtered_reads <- reads[pass_filter]
-    
-    # Construct the full path for the filtered file in the working directory
-    filtered_file <- file.path(output_dir, output_filename)
-    
-    # Write the filtered reads to the new file
-    writeFastq(filtered_reads, filtered_file, mode = "w", compress = FALSE, append = FALSE)
-    
-    # Return the path of the filtered file
-    return(filtered_file)
-  }
-  
-  # Function to get the number of reads in a FASTQ file
-  get_read_count <- function(fastq_file) {
-    reads <- readFastq(fastq_file)
-    return(length(reads))
-  }
-  
+  )
   observeEvent(input$create_index, {
-    req(input$genome_fasta_indexing, input$memory_size)
+    req(input$genome_fasta_indexing, input$memory_size, input$index_base_name)
     
     genome_fasta <- input$genome_fasta_indexing$datapath
     memory_size <- input$memory_size
+    index_base_name <- input$index_base_name  # Use the basename provided by the user
     working_directory <- working_dir()
     
     showNotification("Starting genome index creation. This may take between 1.5 to 2 hours.", duration = NULL)
@@ -436,12 +486,9 @@ server <- function(input, output, session) {
     future({
       setwd(working_directory)
       
-      # Use timestamp for a unique base name
-      timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-      index_base <- paste0("index_", timestamp)
-      
+      # Build the index with the basename chosen by the user
       buildindex(
-        basename = index_base,
+        basename = index_base_name,
         reference = genome_fasta,
         gappedIndex = FALSE,
         indexSplit = TRUE,
@@ -450,9 +497,11 @@ server <- function(input, output, session) {
         colorspace = FALSE
       )
       
-      index_files <- list.files(pattern = paste0(index_base, ".*\\.(reads|files|txt|b.array|b.tab)"), path = working_directory, full.names = TRUE)
+      # Get the list of index files created
+      index_files <- list.files(pattern = paste0(index_base_name, ".*\\.(reads|files|txt|b.array|b.tab)"), 
+                                path = working_directory, full.names = TRUE)
       
-      list(index_files = index_files, index_base = index_base)
+      list(index_files = index_files, index_base_name = index_base_name)
     }, seed = TRUE) %...>% (function(result) {
       index_files <- result$index_files
       if (length(index_files) > 0) {
@@ -476,7 +525,6 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$align_reads, {
-    # Capture the current value of reactive inputs inside the reactive context
     files_to_use <- if (!is.null(filtered_files()$file1) && !is.null(filtered_files()$file2)) {
       c(filtered_files()$file1$datapath, filtered_files()$file2$datapath)
     } else if (!is.null(demultiplexed_files()$file1) && !is.null(demultiplexed_files()$file2)) {
@@ -522,6 +570,7 @@ server <- function(input, output, session) {
       write.csv(counts_matrix(), file, row.names = TRUE)
     }
   )
+  
   observeEvent(input$generate_counts_matrix, {
     req(input$gtf_file, input$bam_file, input$gtf_attr_type, input$sample_name)
     showNotification("Generating counts matrix", duration = 2)
@@ -551,7 +600,7 @@ server <- function(input, output, session) {
           annot.ext = gtf_file,
           isGTFAnnotationFile = TRUE,
           GTF.attrType = gtf_attr_type,
-          isPairedEnd = TRUE  # Always using paired-end reads
+          isPairedEnd = TRUE
         )
         counts_df <- as.data.frame(result$counts)
         colnames(counts_df) <- sample_name
@@ -586,17 +635,78 @@ server <- function(input, output, session) {
     })
   })
   
+  observeEvent(input$filter_reads, {
+    # Ensure either demultiplexed or original FASTQs are available
+    req(
+      (isTruthy(demultiplexed_files()$file1) && isTruthy(demultiplexed_files()$file2)) ||
+        (isTruthy(fastq_files()$file1) && isTruthy(fastq_files()$file2))
+    )
+    
+    # Notify the user that filtering has started
+    showNotification("Filtering reads below quality threshold started.", duration = 2)
+    
+    # Retrieve the phred_offset and quality_threshold inside the reactive context
+    phred_offset <- get_phred_offset(input$machine_type)
+    quality_threshold <- input$quality_threshold
+    
+    # Define the output directory
+    output_dir <- working_dir()
+    
+    # Determine which files to use: demultiplexed or original
+    file_to_use1 <- if (isTruthy(demultiplexed_files()$file1)) {
+      demultiplexed_files()$file1$datapath
+    } else {
+      fastq_files()$file1$datapath
+    }
+    
+    file_to_use2 <- if (isTruthy(demultiplexed_files()$file2)) {
+      demultiplexed_files()$file2$datapath
+    } else {
+      fastq_files()$file2$datapath
+    }
+    
+    future({
+      # Inside the future, we now have access to the values of phred_offset and quality_threshold
+      
+      # Filter the reads for each FASTQ file with a timestamped name
+      filtered_file1 <- filter_fastq_by_quality(file_to_use1, output_dir, phred_offset, quality_threshold)
+      filtered_file2 <- filter_fastq_by_quality(file_to_use2, output_dir, phred_offset, quality_threshold)
+      
+      list(filtered_file1 = filtered_file1, filtered_file2 = filtered_file2)
+    }, seed = TRUE) %...>% (function(filtered_files) {
+      # Update reactive values with the newly filtered files
+      filtered_files(list(file1 = filtered_files$filtered_file1, file2 = filtered_files$filtered_file2))
+      
+      # Notify the user that filtering has completed
+      showNotification("Filtering reads below quality threshold completed.", duration = 2)
+    }) %...!% (function(err) {
+      # Notify the user if an error occurs during filtering
+      showModal(modalDialog(
+        title = "Error",
+        paste("Error during filtering process:", err$message),
+        easyClose = TRUE,
+        footer = NULL
+      ))
+    })
+  })
+  
+
   
   observeEvent(input$demultiplex, {
     req(input$barcodes_file, input$fastq_file1)
+    
+    # Notify the user that demultiplexing has started
+    showNotification("Demultiplexing process started.", duration = 2)
+    
+    # Retrieve the phred_offset and pass it to future
+    phred_offset <- get_phred_offset(input$machine_type)
     
     barcodes_file <- input$barcodes_file$datapath
     fastq_file1 <- input$fastq_file1$datapath
     output_dir <- working_dir()
     
     future({
-      message("Starting demultiplexing")
-      
+      # Inside the future, we now have access to the value of phred_offset
       barcodes <- read.csv(barcodes_file, header = FALSE, stringsAsFactors = FALSE, skip = 1)
       barcodes <- as.character(barcodes[[1]])
       barcodes <- gsub("\\s", "", barcodes)
@@ -606,28 +716,12 @@ server <- function(input, output, session) {
         stop("All barcodes must be of the same length.")
       }
       
-      fq <- readFastq(fastq_file1)
+      # Use the phred_offset value directly
+      custom_demultiplex(fastq_file1, barcodes, output_dir, phred_offset)
       
-      sequences <- as.character(sread(fq))
-      qualities <- extract_quality_scores(fastq_file1)
-      
-      demultiplexed <- custom_demultiplex(fastq_file1, barcodes, output_dir)
-      
-      for (barcode in names(demultiplexed)) {
-        demux_reads <- demultiplexed[[barcode]]
-        
-        if (length(demux_reads$sequences) > 0) {
-          demux_fq <- ShortReadQ(
-            sread = DNAStringSet(demux_reads$sequences),
-            quality = new(Class = class(quality(fq)), demux_reads$qualities),
-            id = BStringSet(paste0("@SEQ_ID_", 1:length(demux_reads$sequences)))
-          )
-          writeFastq(demux_fq, file.path(output_dir, paste0("demultiplexed_", barcode, ".fastq")), mode = "w", compress = FALSE, append = FALSE)
-        }
-      }
       TRUE
     }, seed = TRUE) %...>% (function(result) {
-      showNotification("Demultiplexing completed.")
+      showNotification("Demultiplexing completed.", duration = 2)
     }) %...!% (function(err) {
       showModal(modalDialog(
         title = "Error",
@@ -667,23 +761,30 @@ server <- function(input, output, session) {
   
   observeEvent(input$create_gff3, {
     req(input$gtf_file)
-    showNotification("Generating GFF3 file", duration = 2)
+    
+    # Notify the user that GFF3 generation has started
+    showNotification("Generating GFF3 file started.", duration = 2)
     
     gtf_file <- input$gtf_file$datapath
     working_directory <- working_dir()
     timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
     
     future({
+      # Generate the GFF3 file
       gff_file <- file.path(working_directory, paste0("annotations_", timestamp, ".gff3"))
       gtf <- import(gtf_file, format = "gtf")
       export(gtf, gff_file, format = "gff3")
       gff_file
     }, seed = TRUE) %...>% (function(gff_file) {
+      # Notify the user that GFF3 generation was successful
       showNotification("GFF3 file generated successfully.", duration = 2)
+      
+      # Display the path to the generated GFF3 file
       output$gff3_file_path <- renderText({
         paste("Generated GFF3 File Path: ", gff_file)
       })
     }) %...!% (function(err) {
+      # Notify the user if an error occurs during GFF3 generation
       showModal(modalDialog(
         title = "Error",
         paste("Error generating GFF3 file:", err$message),
@@ -692,6 +793,7 @@ server <- function(input, output, session) {
       ))
     })
   })
+  
   
   observeEvent(input$identify_gtf_attributes, {
     req(input$gtf_file)
@@ -737,11 +839,6 @@ server <- function(input, output, session) {
     })
   })
 }
-
-
-
-
-
 
 # Run the application 
 shinyApp(ui = ui, server = server)
